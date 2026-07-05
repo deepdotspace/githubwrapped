@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<!--
+  GitHub Wrapped is a full-bleed, dark, immersive experience. The active theme is
+  a dark one (forest); the story styles itself regardless, and the body is pinned
+  to the deep-green base so there is never a white flash on load.
+-->
+<html lang="en" data-theme="forest">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.ico" />
+    <title>GitHub Wrapped · Your Year in Code</title>
+    <meta
+      name="description"
+      content="Paste a GitHub username and get a Spotify-Wrapped-style story of your year in code: contributions, streaks, top languages, and your developer archetype."
+    />
+    <meta property="og:title" content="GitHub Wrapped · Your Year in Code" />
+    <meta
+      property="og:description"
+      content="Your year in code, wrapped. Paste a GitHub username for a scrollable story of contributions, streaks, top languages, and your developer archetype."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://githubwrapped.app.space/og-default.png" />
+    <meta property="og:url" content="https://githubwrapped.app.space" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="GitHub Wrapped · Your Year in Code" />
+    <meta name="twitter:description" content="Your year in code, wrapped. Paste a GitHub username." />
+    <meta name="twitter:image" content="https://githubwrapped.app.space/og-default.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #02160e;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
