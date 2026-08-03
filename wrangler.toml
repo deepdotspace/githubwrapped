@@ -39,7 +39,7 @@ bindings = [
 #   docs/proposals/binding-auto-provisioning.md
 
 [vars]
-DEEPSPACE_APP_ID = "githubwrapped"
+DEEPSPACE_APP_ID = "app_01KZ4FR68658BCNNBR9M9641E1"
 APP_NAME = "githubwrapped"
 
 # Per-IP rate limiting for the anonymous, owner-billed /api/wrapped + /api/og
