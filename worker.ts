@@ -16,7 +16,14 @@
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { verifyJwt, apiWorkerFetch, platformWorkerFetch, authWorkerFetch } from 'deepspace/worker'
+import {
+  verifyJwt,
+  apiWorkerFetch,
+  platformWorkerFetch,
+  authWorkerFetch,
+  authenticatedRoomRequest,
+  resolveAppRole,
+} from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
 import { RecordRoom, YjsRoom, CanvasRoom, PresenceRoom, CronRoom, JobRoom } from 'deepspace/worker'
 import type { Job, JobContext, ActionTools, ActionResult, DOManifest, DOBindings } from 'deepspace/worker'
@@ -86,7 +93,13 @@ export class AppCronRoom extends CronRoom<Env> {
  */
 export class AppJobRoom extends JobRoom<Env> {
   constructor(state: DurableObjectState, env: Env) {
-    super(state, env)
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
   }
 
   protected async onJob(job: Job, ctx: JobContext): Promise<unknown> {
@@ -380,19 +393,27 @@ app.all('/api/integrations/:name/:endpoint', async (c) => {
 // WebSocket routes
 // ---------------------------------------------------------------------------
 
-// The DO reads identity (userId, userName, userEmail, userImageUrl, role)
-// off the URL it receives and trusts it. Anything the client put on the URL
-// is stripped on every code path; identity is re-applied only from a
-// verified JWT. Three states: no token = anonymous (the SDK's
-// allowAnonymous flow), invalid token = 401, valid token = JWT identity.
+// The DO reads identity off verified `x-user-*` headers on the request it
+// receives. `authenticatedRoomRequest` is what puts them there: it strips
+// every client-supplied identity input first — the `token` query param, the
+// legacy identity query params, and any inbound `x-user-*` headers — so
+// neither channel can be spoofed, then sets only what the JWT proved.
+// Three states: no token = anonymous (the SDK's allowAnonymous flow),
+// invalid token = 401, valid token = JWT identity.
+//
+// `extraIdentity` may only supply `role`; name / email / avatar come from the
+// verified claims and cannot be overridden per route.
 function wsRoute(
   doNamespace: (env: Env) => DurableObjectNamespace,
-  extraParams?: (auth: VerifyResult) => Record<string, string>,
+  extraIdentity?: (
+    auth: VerifyResult,
+    env: Env,
+  ) => { role?: string } | Promise<{ role?: string }>,
 ) {
   return async (c: any) => {
     const id = c.req.param('roomId') ?? c.req.param('docId') ?? c.req.param('scopeId')
-    const url = new URL(c.req.url)
-    const token = url.searchParams.get('token')
+    if (!id) return new Response('Not found', { status: 404 })
+    const token = new URL(c.req.url).searchParams.get('token')
 
     let auth: VerifyResult | null = null
     if (token) {
@@ -400,27 +421,15 @@ function wsRoute(
       if (!auth) return new Response('Unauthorized', { status: 401 })
     }
 
-    const doUrl = new URL(c.req.url)
-    doUrl.searchParams.delete('token')
-    for (const k of ['userId', 'userName', 'userEmail', 'userImageUrl', 'role']) {
-      doUrl.searchParams.delete(k)
-    }
-
-    if (auth) {
-      doUrl.searchParams.set('userId', auth.userId)
-      if (auth.claims.name) doUrl.searchParams.set('userName', auth.claims.name)
-      if (auth.claims.email) doUrl.searchParams.set('userEmail', auth.claims.email)
-      if (auth.claims.image) doUrl.searchParams.set('userImageUrl', auth.claims.image)
-      if (extraParams) {
-        for (const [k, v] of Object.entries(extraParams(auth))) {
-          doUrl.searchParams.set(k, v)
-        }
-      }
-    }
+    const roomRequest = authenticatedRoomRequest(
+      c.req.raw,
+      auth,
+      auth ? await extraIdentity?.(auth, c.env) : undefined,
+    )
 
     const ns = doNamespace(c.env)
     const stub = ns.get(ns.idFromName(id))
-    return stub.fetch(new Request(doUrl.toString(), c.req.raw))
+    return stub.fetch(roomRequest)
   }
 }
 
@@ -512,55 +521,50 @@ async function resolveDocsYjsRole(
   return null
 }
 
+// Bypasses `wsRoute` because the role is per-document, not per-app: it comes
+// from the `documents` record's owner / editors / collaborators lists, and a
+// user with no entry is refused outright rather than downgraded.
 app.get('/ws/yjs/:docId', async (c) => {
   const docId = c.req.param('docId')
-  const url = new URL(c.req.url)
-  const token = url.searchParams.get('token')
+  const token = new URL(c.req.url).searchParams.get('token')
   const auth = token ? (await verifyJwt(jwtConfig(c.env), token)).result : null
   if (!auth) return new Response('Unauthorized', { status: 401 })
 
   const role = await resolveDocsYjsRole(c.env, docId, auth.userId)
   if (!role) return new Response('Forbidden', { status: 403 })
 
-  const doUrl = new URL(c.req.url)
-  doUrl.searchParams.set('userId', auth.userId)
-  doUrl.searchParams.set('role', role)
-  doUrl.searchParams.delete('token')
+  const roomRequest = authenticatedRoomRequest(c.req.raw, auth, { role })
 
   const stub = c.env.YJS_ROOMS.get(c.env.YJS_ROOMS.idFromName(docId))
-  return stub.fetch(new Request(doUrl.toString(), c.req.raw))
+  return stub.fetch(roomRequest)
 })
 
 app.get(
   '/ws/canvas/:docId',
   wsRoute(
     (env) => env.CANVAS_ROOMS,
-    () => ({ role: 'member' }),
+    // The user's real app role, read from the canonical users collection.
+    // A constant 'member' here would hand every signed-in connection write
+    // access regardless of what the app actually granted them.
+    async (auth, env) => ({ role: await resolveAppRole(env, auth.userId) }),
   ),
 )
 
-app.get(
-  '/ws/presence/:scopeId',
-  wsRoute(
-    (env) => env.PRESENCE_ROOMS,
-    (auth) => ({
-      ...(auth.claims.name ? { userName: auth.claims.name } : {}),
-      ...(auth.claims.email ? { userEmail: auth.claims.email } : {}),
-      ...(auth.claims.image ? { userImageUrl: auth.claims.image } : {}),
-    }),
-  ),
-)
+// Presence carries no extra identity: name and avatar are set from the
+// verified JWT claims by `authenticatedRoomRequest`, and email / avatar were
+// dropped from the presence peer shape entirely.
+app.get('/ws/presence/:scopeId', wsRoute((env) => env.PRESENCE_ROOMS))
 
 app.get(
   '/ws/cron/:roomId',
   wsRoute(
     (env) => env.CRON_ROOMS,
-    // Authenticated users get write access (trigger / pause / resume).
-    // Anonymous connections fall through with no role and become viewers,
-    // which CronRoom enforces as read-only. Apps that want stricter access
-    // (e.g. owner-only) should replace this with an inline handler that
-    // resolves role from app state — see the /ws/yjs route for the pattern.
-    () => ({ role: 'member' }),
+    // Write access (trigger / pause / resume) follows the user's real app
+    // role. Anonymous connections carry no role and become viewers, which
+    // CronRoom enforces as read-only. Apps that want stricter access (e.g.
+    // owner-only) should replace this with an inline handler that resolves
+    // role from app state — see the /ws/yjs route for the pattern.
+    async (auth, env) => ({ role: await resolveAppRole(env, auth.userId) }),
   ),
 )
 
@@ -940,11 +944,20 @@ function injectOgMeta(res: Response, username: string, origin: string): Response
 app.get('*', async (c) => {
   const url = new URL(c.req.url)
 
-  // NOTE: dead in prod. Workers-for-Platforms does not route bare SPA paths
-  // through the worker (even with run_worker_first), so this branch never runs on
-  // the deploy; index.html (with its static OG meta) is served from the edge.
-  // Kept for if/when the platform routes SPA paths through the worker; the live
-  // unfurl relies on the static meta in index.html instead. See sdk-issues.md #2.
+  // NOTE: this branch was dead on the pre-0.23 deploy — bare SPA paths were
+  // answered by the asset layer's "single-page-application" fallback and never
+  // reached the worker, so the live unfurl came from the static OG meta in
+  // index.html. See sdk-issues.md #2.
+  //
+  // UNVERIFIED AFTER THE 0.23.2 MIGRATION. `not_found_handling` is now
+  // "none", so an asset-layer miss falls through to this worker, and
+  // `assets_navigation_has_no_effect` removes the navigation-prefers-assets
+  // behaviour. Both point at this branch running on the next deploy. If it
+  // does, `injectOgMeta` APPENDS to a <head> that already carries static
+  // og:/twitter: tags (index.html:17-28) — nine duplicated properties, and
+  // first-wins crawlers would still show the generic card. Decide before the
+  // next deploy: either strip the existing og:/twitter: meta in the rewriter
+  // before appending, or drop this branch and keep the static meta.
   //
   // A single-segment username route (e.g. /torvalds) is an SPA route, not an
   // asset. Serve index.html with per-user OG meta injected so shared links
@@ -970,6 +983,12 @@ app.get('*', async (c) => {
 
   const assetRes = await c.env.ASSETS.fetch(c.req.raw)
   if (assetRes.status !== 404) return assetRes
+
+  // A FILE, not a client route: a miss must 404. Returning the shell here
+  // is HTML parsed as JavaScript, which is a blank page.
+  if (url.pathname.slice(url.pathname.lastIndexOf('/') + 1).includes('.')) {
+    return c.json({ error: 'not_found' }, 404)
+  }
 
   // 404 from assets -> SPA fallback to index.html.
   const indexReq = new Request(new URL('/', url).toString(), c.req.raw)
