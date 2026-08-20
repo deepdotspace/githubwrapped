@@ -1,12 +1,17 @@
 name = "githubwrapped"
-compatibility_date = "2025-01-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2026-08-16"
+compatibility_flags = ["nodejs_compat", "assets_navigation_has_no_effect"]
 main = "worker.ts"
 
 [assets]
 directory = "dist"
 binding = "ASSETS"
-not_found_handling = "single-page-application"
+# The asset layer serves what it HAS and invents nothing: a miss reaches the
+# worker as a real 404 and the catch-all in worker.ts decides — the app shell
+# for a client route, 404 for a file that no longer exists. Under
+# "single-page-application" the layer answered BOTH with the shell at 200, so a
+# deleted build chunk came back as HTML a script tag then failed to parse.
+not_found_handling = "none"
 # Route every request worker-first so the catch-all can inject per-user Open Graph
 # meta on bare /:username paths (shared links unfurl with the trophy card). The
 # catch-all still serves static assets via ASSETS.fetch and does its own SPA
