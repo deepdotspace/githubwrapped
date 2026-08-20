@@ -957,6 +957,19 @@ function injectOgMeta(res: Response, username: string, origin: string): Response
     `<meta name="twitter:image" content="${escapeAttr(image)}">`
 
   return new HTMLRewriter()
+    // Drop the static generic og:/twitter: meta before adding the per-user set.
+    // index.html ships a default card (og-default.png) so that links unfurl at
+    // all when this branch does not run. When it does run, appending on top
+    // would leave two of every property, and crawlers that take the first
+    // occurrence would keep showing the generic card - the per-user tags would
+    // be inert. HTMLRewriter streams in document order: these meta elements sit
+    // inside <head> and are removed as they are encountered, while append()
+    // inserts at </head>, so the removals always land first.
+    .on('meta[property^="og:"], meta[name^="twitter:"]', {
+      element(el) {
+        el.remove()
+      },
+    })
     .on('head', {
       element(el) {
         el.append(tags, { html: true })
